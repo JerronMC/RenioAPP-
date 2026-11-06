@@ -26,7 +26,6 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
-          # Do not request the removed legacy "tools" SDK package.
           packages: 'platform-tools'
 
       - name: Install Android SDK packages
@@ -37,14 +36,75 @@ jobs:
         with:
           gradle-version: '9.6.0'
 
+      - name: Find or extract RenioAPP project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_DIR="$GITHUB_WORKSPACE"
+
+          # Case 1: Android project files are already at repository root.
+          if [[ -f "$PROJECT_DIR/settings.gradle" && -d "$PROJECT_DIR/app" ]]; then
+            echo "Using Android project at repository root."
+
+          # Case 2: The extracted ZIP folder was uploaded as /renioapp.
+          elif [[ -f "$PROJECT_DIR/renioapp/settings.gradle" && -d "$PROJECT_DIR/renioapp/app" ]]; then
+            PROJECT_DIR="$PROJECT_DIR/renioapp"
+            echo "Using Android project in the renioapp folder."
+
+          # Case 3: The ZIP itself was uploaded to the repository.
+          else
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -iname '*.zip' -print -quit || true)"
+
+            if [[ -z "$ZIP_FILE" ]]; then
+              echo "::error::No Android project found. Expected settings.gradle + app/, a renioapp/ folder, or an uploaded project ZIP."
+              echo "Repository files:"
+              find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -print | sort
+              exit 1
+            fi
+
+            echo "Extracting project archive: $(basename "$ZIP_FILE")"
+            UNPACK_DIR="$GITHUB_WORKSPACE/.renioapp-unpacked"
+            rm -rf "$UNPACK_DIR"
+            mkdir -p "$UNPACK_DIR"
+            unzip -q "$ZIP_FILE" -d "$UNPACK_DIR"
+
+            SETTINGS_FILE="$(find "$UNPACK_DIR" -type f -name 'settings.gradle' -print -quit || true)"
+            if [[ -z "$SETTINGS_FILE" ]]; then
+              echo "::error::The uploaded ZIP does not contain settings.gradle. Check that you uploaded the RenioAPP project ZIP."
+              find "$UNPACK_DIR" -maxdepth 4 -type f -print | sort
+              exit 1
+            fi
+
+            PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          fi
+
+          if [[ ! -f "$PROJECT_DIR/build.gradle" || ! -d "$PROJECT_DIR/app" ]]; then
+            echo "::error::Found settings.gradle, but build.gradle or app/ is missing from the same project folder."
+            echo "Detected project folder: $PROJECT_DIR"
+            find "$PROJECT_DIR" -maxdepth 3 -type f -print | sort
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "RenioAPP project folder: $PROJECT_DIR"
+
       - name: Build APK
-        run: gradle --no-daemon :app:assembleDebug
+        run: gradle --no-daemon -p "$PROJECT_DIR" :app:assembleDebug
+
+      - name: Prepare APK artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" \
+             "$GITHUB_WORKSPACE/artifacts/RenioAPP-debug.apk"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: RenioAPP-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: artifacts/RenioAPP-debug.apk
           if-no-files-found: error
           retention-days: 14
           
